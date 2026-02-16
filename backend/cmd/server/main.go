@@ -3,29 +3,39 @@ package main
 import (
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/joho/godotenv"
+
+	"jedug-backend/internal/config"
+	"jedug-backend/internal/database"
 )
 
 func main() {
-	// Load .env file
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found")
 	}
 
-	// Initialize Fiber app
+	cfg := config.Load()
+
+	pool := database.TryConnect(cfg.DB)
+	defer database.Close()
+
 	app := fiber.New(fiber.Config{
 		AppName: "Jedug Backend v1.0",
 	})
 
-	// Middleware
 	app.Use(logger.New())
-	app.Use(cors.New())
+	app.Use(cors.New(cors.Config{
+		AllowOrigins: "http://localhost:5173, http://localhost:5174, http://localhost:3000",
+		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
+		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
+	}))
 
-	// Routes
 	app.Get("/", func(c *fiber.Ctx) error {
 		return c.SendString("Jedug Backend is running! 🚀")
 	})
@@ -34,17 +44,35 @@ func main() {
 	v1 := api.Group("/v1")
 
 	v1.Get("/health", func(c *fiber.Ctx) error {
+		dbStatus := "disconnected"
+		if pool != nil {
+			if err := pool.Ping(c.Context()); err == nil {
+				dbStatus = "connected"
+			}
+		}
+		status := "ok"
+		if dbStatus != "connected" {
+			status = "degraded"
+		}
 		return c.JSON(fiber.Map{
-			"status":  "ok",
-			"message": "Service is healthy",
+			"status":  status,
+			"message": "Service is running",
+			"db":      dbStatus,
 		})
 	})
 
-	// Listen on port
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "3000"
-	}
+	port := cfg.Port
 
-	log.Fatal(app.Listen(":" + port))
+	go func() {
+		if err := app.Listen(":" + port); err != nil {
+			log.Fatalf("❌ Server error: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("🛑 Shutting down server...")
+	_ = app.Shutdown()
 }
