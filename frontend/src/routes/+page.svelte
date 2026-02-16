@@ -34,7 +34,7 @@
     map = new maplibregl.Map({
       container: mapContainer,
       style: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
-      center: [106.8456, -6.2088],
+      center: [106.6297, -6.1781],
       zoom: 12,
       attributionControl: false
     });
@@ -47,6 +47,7 @@
 
     map.on('load', () => {
       mapLoaded = true;
+      loadDistrictBoundaries();
       addRoadSegments();
       addMarkers(maplibregl);
     });
@@ -54,6 +55,68 @@
 
   // Dummy road segments data - simulasi kondisi jalan berwarna seperti traffic layer
   // Koordinat mengikuti jalan-jalan utama Jakarta
+
+  async function loadDistrictBoundaries() {
+    try {
+      const res = await fetch('/api/v1/districts?city=kota-tangerang');
+      if (!res.ok) throw new Error('Failed to fetch districts');
+      const geojson = await res.json();
+
+      map.addSource('district-boundaries', {
+        type: 'geojson',
+        data: geojson
+      });
+
+      // Fill layer - area kecamatan dengan warna transparan
+      map.addLayer({
+        id: 'district-fill',
+        type: 'fill',
+        source: 'district-boundaries',
+        paint: {
+          'fill-color': '#3182CE',
+          'fill-opacity': 0.08
+        }
+      });
+
+      // Border layer - garis batas kecamatan
+      map.addLayer({
+        id: 'district-border',
+        type: 'line',
+        source: 'district-boundaries',
+        paint: {
+          'line-color': '#3182CE',
+          'line-width': 2,
+          'line-opacity': 0.6,
+          'line-dasharray': [3, 2]
+        }
+      });
+
+      // Label layer - nama kecamatan
+      map.addLayer({
+        id: 'district-labels',
+        type: 'symbol',
+        source: 'district-boundaries',
+        layout: {
+          'text-field': ['get', 'name'],
+          'text-size': 11,
+          'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+          'text-transform': 'uppercase',
+          'text-letter-spacing': 0.05,
+          'text-allow-overlap': false,
+          'text-ignore-placement': false
+        },
+        paint: {
+          'text-color': '#2B6CB0',
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 1.5,
+          'text-opacity': 0.85
+        }
+      });
+    } catch (err) {
+      console.error('Failed to load district boundaries:', err);
+    }
+  }
+
   const roadSegments = [
     // === Jl. Jend. Sudirman (Senayan → Bundaran HI) - HIJAU/AMAN ===
     {

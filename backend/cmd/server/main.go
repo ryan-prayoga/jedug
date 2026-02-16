@@ -13,6 +13,8 @@ import (
 
 	"jedug-backend/internal/config"
 	"jedug-backend/internal/database"
+	"jedug-backend/internal/handlers"
+	"jedug-backend/internal/repository"
 )
 
 func main() {
@@ -60,6 +62,13 @@ func main() {
 			"db":      dbStatus,
 		})
 	})
+
+	// District routes
+	if pool != nil {
+		districtRepo := repository.NewDistrictRepo(pool)
+		districtHandler := handlers.NewDistrictHandler(districtRepo)
+		v1.Get("/districts", districtHandler.GetDistricts)
+	}
 
 	port := cfg.Port
 
