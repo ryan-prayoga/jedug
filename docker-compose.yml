@@ -1,0 +1,47 @@
+version: "3.8"
+
+services:
+  # PostgreSQL with PostGIS
+  db:
+    image: postgis/postgis:15-3.3
+    container_name: jedug_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-jedug}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docs/schema.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # Redis for Caching/Session (if needed later)
+  redis:
+    image: redis:alpine
+    container_name: jedug_redis
+    restart: always
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+
+  # PocketBase (Optional, mapped to local folder)
+  pocketbase:
+    image: ghcr.io/muchobien/pocketbase:latest
+    container_name: jedug_pocketbase
+    restart: unless-stopped
+    command:
+      - --encryptionEnv
+      - ENCRYPTION
+    environment:
+      ENCRYPTION: example_encryption_key_please_change
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./pocketbase/pb_data:/pb_data
+      - ./pocketbase/pb_public:/pb_public
+
+volumes:
+  postgres_data:
+  redis_data:
