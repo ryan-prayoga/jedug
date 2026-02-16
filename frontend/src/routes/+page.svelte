@@ -8,10 +8,14 @@
 
   let mapContainer: HTMLDivElement;
   let map: any;
+  let L: any;
   let mapLoaded = false;
   let showSidebar = false;
   let selectedFilter: string = 'semua';
   let selectedReport: Report | null = null;
+  let districtLayer: any = null;
+  let roadLayer: any = null;
+  let markerLayer: any = null;
 
   const filters = [
     { value: 'semua', label: 'Semua' },
@@ -28,101 +32,70 @@
   onMount(async () => {
     if (!browser) return;
 
-    const maplibregl = await import('maplibre-gl');
-    await import('maplibre-gl/dist/maplibre-gl.css');
+    L = await import('leaflet');
+    await import('leaflet/dist/leaflet.css');
 
-    map = new maplibregl.Map({
-      container: mapContainer,
-      style: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
-      center: [106.6297, -6.1781],
+    map = L.map(mapContainer, {
+      center: [-6.1781, 106.6297],
       zoom: 12,
+      zoomControl: false,
       attributionControl: false
     });
 
-    map.addControl(new maplibregl.NavigationControl(), 'top-right');
-    map.addControl(new maplibregl.GeolocateControl({
-      positionOptions: { enableHighAccuracy: true },
-      trackUserLocation: true
-    }), 'top-right');
+    // Dark OSM tile layer (CartoDB Dark Matter)
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      maxZoom: 19,
+      subdomains: 'abcd'
+    }).addTo(map);
 
-    map.on('load', () => {
-      mapLoaded = true;
-      loadDistrictBoundaries();
-      addRoadSegments();
-      addMarkers(maplibregl);
-    });
+    // Zoom control kanan atas
+    L.control.zoom({ position: 'topright' }).addTo(map);
+
+    mapLoaded = true;
+    if (browser) (window as any).__map = map;
+
+    loadDistrictBoundaries();
+    addRoadSegments();
+    addMarkers();
   });
-
-  // Dummy road segments data - simulasi kondisi jalan berwarna seperti traffic layer
-  // Koordinat mengikuti jalan-jalan utama Jakarta
 
   async function loadDistrictBoundaries() {
     try {
       const res = await fetch('/api/v1/districts?city=kota-tangerang');
-      if (!res.ok) throw new Error('Failed to fetch districts');
-      const geojson = await res.json();
+      if (!res.ok) throw new Error(`Failed to fetch districts: ${res.status}`);
+      const data = await res.json();
+      const geojson = data.geojson ?? data;
 
-      map.addSource('district-boundaries', {
-        type: 'geojson',
-        data: geojson
-      });
+      // Hapus layer lama jika ada (HMR reload)
+      if (districtLayer) {
+        map.removeLayer(districtLayer);
+      }
 
-      // Fill layer - area kecamatan dengan warna transparan
-      map.addLayer({
-        id: 'district-fill',
-        type: 'fill',
-        source: 'district-boundaries',
-        paint: {
-          'fill-color': '#3182CE',
-          'fill-opacity': 0.08
+      districtLayer = L.geoJSON(geojson, {
+        style: () => ({
+          fillColor: '#4299E1',
+          fillOpacity: 0.15,
+          color: '#63B3ED',
+          weight: 2,
+          opacity: 0.7
+        }),
+        onEachFeature: (feature: any, layer: any) => {
+          if (feature.properties?.name) {
+            layer.bindTooltip(feature.properties.name.toUpperCase(), {
+              permanent: true,
+              direction: 'center',
+              className: 'district-label'
+            });
+          }
         }
-      });
-
-      // Border layer - garis batas kecamatan
-      map.addLayer({
-        id: 'district-border',
-        type: 'line',
-        source: 'district-boundaries',
-        paint: {
-          'line-color': '#3182CE',
-          'line-width': 2,
-          'line-opacity': 0.6,
-          'line-dasharray': [3, 2]
-        }
-      });
-
-      // Label layer - nama kecamatan
-      map.addLayer({
-        id: 'district-labels',
-        type: 'symbol',
-        source: 'district-boundaries',
-        layout: {
-          'text-field': ['get', 'name'],
-          'text-size': 11,
-          'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
-          'text-transform': 'uppercase',
-          'text-letter-spacing': 0.05,
-          'text-allow-overlap': false,
-          'text-ignore-placement': false
-        },
-        paint: {
-          'text-color': '#2B6CB0',
-          'text-halo-color': '#ffffff',
-          'text-halo-width': 1.5,
-          'text-opacity': 0.85
-        }
-      });
+      }).addTo(map);
     } catch (err) {
       console.error('Failed to load district boundaries:', err);
     }
   }
 
   const roadSegments = [
-    // === Jl. Jend. Sudirman (Senayan → Bundaran HI) - HIJAU/AMAN ===
-    {
-      id: 'road-sudirman-1',
-      color: '#38A169',
-      coords: [
+    { id: 'road-sudirman-1', color: '#38A169', coords: [
         [106.8019, -6.2270], [106.8022, -6.2250], [106.8025, -6.2230],
         [106.8029, -6.2210], [106.8033, -6.2190], [106.8038, -6.2170],
         [106.8042, -6.2150], [106.8046, -6.2130], [106.8050, -6.2110],
@@ -130,32 +103,20 @@
         [106.8066, -6.2030], [106.8069, -6.2010]
       ]
     },
-    // === Jl. M.H. Thamrin (Bundaran HI → Monas) - KUNING/RUSAK RINGAN ===
-    {
-      id: 'road-thamrin',
-      color: '#ECC94B',
-      coords: [
+    { id: 'road-thamrin', color: '#ECC94B', coords: [
         [106.8069, -6.2010], [106.8072, -6.1990], [106.8075, -6.1970],
         [106.8078, -6.1950], [106.8080, -6.1935], [106.8082, -6.1920],
         [106.8084, -6.1900], [106.8085, -6.1880], [106.8086, -6.1860],
         [106.8087, -6.1845], [106.8088, -6.1830]
       ]
     },
-    // === Jl. Gatot Subroto Barat (Slipi → Semanggi) - MERAH/RUSAK BERAT ===
-    {
-      id: 'road-gatsu-barat',
-      color: '#E53E3E',
-      coords: [
+    { id: 'road-gatsu-barat', color: '#E53E3E', coords: [
         [106.7930, -6.1960], [106.7950, -6.1975], [106.7970, -6.1990],
         [106.7990, -6.2005], [106.8010, -6.2020], [106.8030, -6.2040],
         [106.8045, -6.2055], [106.8060, -6.2065], [106.8069, -6.2070]
       ]
     },
-    // === Jl. Gatot Subroto Timur (Semanggi → Pancoran) - ORANYE/RUSAK SEDANG ===
-    {
-      id: 'road-gatsu-timur',
-      color: '#ED8936',
-      coords: [
+    { id: 'road-gatsu-timur', color: '#ED8936', coords: [
         [106.8069, -6.2070], [106.8090, -6.2085], [106.8120, -6.2100],
         [106.8150, -6.2115], [106.8180, -6.2130], [106.8210, -6.2148],
         [106.8240, -6.2165], [106.8270, -6.2180], [106.8300, -6.2200],
@@ -163,105 +124,64 @@
         [106.8385, -6.2290], [106.8395, -6.2320], [106.8400, -6.2350]
       ]
     },
-    // === Jl. HR Rasuna Said (Kuningan) - HIJAU/AMAN ===
-    {
-      id: 'road-rasuna',
-      color: '#38A169',
-      coords: [
+    { id: 'road-rasuna', color: '#38A169', coords: [
         [106.8260, -6.2040], [106.8270, -6.2060], [106.8275, -6.2080],
         [106.8278, -6.2100], [106.8280, -6.2120], [106.8282, -6.2140],
         [106.8284, -6.2160], [106.8286, -6.2180], [106.8290, -6.2200],
         [106.8295, -6.2220], [106.8300, -6.2240], [106.8310, -6.2260]
       ]
     },
-    // === Jl. Casablanca (Kuningan → Tebet) - MERAH/RUSAK BERAT ===
-    {
-      id: 'road-casablanca',
-      color: '#E53E3E',
-      coords: [
+    { id: 'road-casablanca', color: '#E53E3E', coords: [
         [106.8260, -6.2210], [106.8240, -6.2220], [106.8220, -6.2230],
         [106.8200, -6.2245], [106.8180, -6.2255], [106.8160, -6.2265],
         [106.8140, -6.2275], [106.8120, -6.2280]
       ]
     },
-    // === Jl. S. Parman (Slipi → Tomang) - HIJAU/AMAN ===
-    {
-      id: 'road-sparman',
-      color: '#38A169',
-      coords: [
+    { id: 'road-sparman', color: '#38A169', coords: [
         [106.7930, -6.1960], [106.7910, -6.1945], [106.7890, -6.1930],
         [106.7870, -6.1915], [106.7850, -6.1900], [106.7830, -6.1885],
         [106.7810, -6.1870], [106.7790, -6.1855]
       ]
     },
-    // === Jl. Medan Merdeka (sekitar Monas) - KUNING/RUSAK RINGAN ===
-    {
-      id: 'road-monas-barat',
-      color: '#ECC94B',
-      coords: [
+    { id: 'road-monas-barat', color: '#ECC94B', coords: [
         [106.8220, -6.1770], [106.8220, -6.1790], [106.8220, -6.1810],
         [106.8220, -6.1830], [106.8220, -6.1850], [106.8220, -6.1870]
       ]
     },
-    {
-      id: 'road-monas-timur',
-      color: '#38A169',
-      coords: [
+    { id: 'road-monas-timur', color: '#38A169', coords: [
         [106.8330, -6.1770], [106.8330, -6.1790], [106.8330, -6.1810],
         [106.8330, -6.1830], [106.8330, -6.1850], [106.8330, -6.1870]
       ]
     },
-    {
-      id: 'road-monas-utara',
-      color: '#38A169',
-      coords: [
+    { id: 'road-monas-utara', color: '#38A169', coords: [
         [106.8220, -6.1770], [106.8240, -6.1770], [106.8260, -6.1770],
         [106.8280, -6.1770], [106.8300, -6.1770], [106.8330, -6.1770]
       ]
     },
-    {
-      id: 'road-monas-selatan',
-      color: '#ED8936',
-      coords: [
+    { id: 'road-monas-selatan', color: '#ED8936', coords: [
         [106.8220, -6.1870], [106.8240, -6.1870], [106.8260, -6.1870],
         [106.8280, -6.1870], [106.8300, -6.1870], [106.8330, -6.1870]
       ]
     },
-    // === Jl. MT Haryono (Pancoran → Cawang) - HITAM/ADA KORBAN ===
-    {
-      id: 'road-mtharyono',
-      color: '#1A202C',
-      coords: [
+    { id: 'road-mtharyono', color: '#1A202C', coords: [
         [106.8400, -6.2350], [106.8420, -6.2370], [106.8440, -6.2390],
         [106.8460, -6.2410], [106.8480, -6.2430], [106.8500, -6.2450],
         [106.8520, -6.2470], [106.8540, -6.2490]
       ]
     },
-    // === Jl. Sudirman bawah (Senayan → Blok M) - ORANYE/RUSAK SEDANG ===
-    {
-      id: 'road-sudirman-2',
-      color: '#ED8936',
-      coords: [
+    { id: 'road-sudirman-2', color: '#ED8936', coords: [
         [106.8019, -6.2270], [106.8015, -6.2290], [106.8010, -6.2310],
         [106.8005, -6.2330], [106.8000, -6.2350], [106.7995, -6.2370],
         [106.7990, -6.2390], [106.7985, -6.2410]
       ]
     },
-    // === Jl. Asia Afrika (Senayan) - HIJAU/AMAN ===
-    {
-      id: 'road-asiaafrika',
-      color: '#38A169',
-      coords: [
+    { id: 'road-asiaafrika', color: '#38A169', coords: [
         [106.8019, -6.2270], [106.8040, -6.2265], [106.8060, -6.2260],
         [106.8080, -6.2255], [106.8100, -6.2250], [106.8120, -6.2250],
         [106.8140, -6.2250]
       ]
     },
-    // === Jl. Prof. Dr. Satrio (Kuningan → Mega Kuningan) - MERAH/RUSAK BERAT ===
-    {
-      id: 'road-satrio',
-      color: '#E53E3E',
-      coords: [
+    { id: 'road-satrio', color: '#E53E3E', coords: [
         [106.8210, -6.2148], [106.8230, -6.2130], [106.8250, -6.2110],
         [106.8260, -6.2090], [106.8260, -6.2070], [106.8260, -6.2040]
       ]
@@ -269,92 +189,63 @@
   ];
 
   function addRoadSegments() {
-    // Satukan semua segmen dalam 1 GeoJSON source
-    const features = roadSegments.map(segment => ({
-      type: 'Feature',
-      properties: { color: segment.color },
-      geometry: {
-        type: 'LineString',
-        coordinates: segment.coords
-      }
-    }));
+    if (roadLayer) map.removeLayer(roadLayer);
 
-    map.addSource('road-conditions', {
-      type: 'geojson',
-      data: {
-        type: 'FeatureCollection',
-        features
-      }
+    roadLayer = L.layerGroup();
+
+    roadSegments.forEach(segment => {
+      // Leaflet coords = [lat, lng] bukan [lng, lat]
+      const latLngs = segment.coords.map(c => [c[1], c[0]] as [number, number]);
+
+      // Glow
+      L.polyline(latLngs, {
+        color: segment.color,
+        weight: 16,
+        opacity: 0.3
+      }).addTo(roadLayer);
+
+      // Main line
+      L.polyline(latLngs, {
+        color: segment.color,
+        weight: 6,
+        opacity: 0.9,
+        lineCap: 'round',
+        lineJoin: 'round'
+      }).addTo(roadLayer);
     });
 
-    // Cari layer simbol pertama, supaya garis tampil DI ATAS jalan tapi DI BAWAH label
-    const layers = map.getStyle().layers;
-    let firstSymbolId: string | undefined;
-    for (const layer of layers) {
-      if (layer.type === 'symbol') {
-        firstSymbolId = layer.id;
-        break;
-      }
-    }
-
-    // Glow layer — lebar dan transparan
-    map.addLayer({
-      id: 'road-conditions-glow',
-      type: 'line',
-      source: 'road-conditions',
-      layout: { 'line-cap': 'round', 'line-join': 'round' },
-      paint: {
-        'line-color': ['get', 'color'],
-        'line-width': 22,
-        'line-opacity': 0.35,
-        'line-blur': 4
-      }
-    }, firstSymbolId);
-
-    // Main line — tebal, jelas, penuh warna
-    map.addLayer({
-      id: 'road-conditions-main',
-      type: 'line',
-      source: 'road-conditions',
-      layout: { 'line-cap': 'round', 'line-join': 'round' },
-      paint: {
-        'line-color': ['get', 'color'],
-        'line-width': 10,
-        'line-opacity': 0.9
-      }
-    }, firstSymbolId);
+    roadLayer.addTo(map);
   }
 
-  function addMarkers(maplibregl: any) {
+  function addMarkers() {
+    if (markerLayer) map.removeLayer(markerLayer);
+    markerLayer = L.layerGroup();
+
     dummyReports.forEach(report => {
       const color = getSeverityColor(report.severity);
-      
-      const el = document.createElement('div');
-      el.className = 'custom-marker';
-      el.innerHTML = `
-        <div style="
-          width: 36px; height: 36px;
-          background: ${color};
-          border: 3px solid white;
-          border-radius: 50%;
-          box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-          display: flex; align-items: center; justify-content: center;
-          cursor: pointer;
-          transition: transform 0.15s ease;
-          font-size: 14px;
-        ">
-          ${report.severity === 'korban' ? '💀' : '🕳️'}
-        </div>
-      `;
-      el.addEventListener('mouseenter', () => {
-        el.querySelector('div')!.style.transform = 'scale(1.2)';
-      });
-      el.addEventListener('mouseleave', () => {
-        el.querySelector('div')!.style.transform = 'scale(1)';
+      const icon = L.divIcon({
+        className: 'custom-marker',
+        html: `
+          <div style="
+            width: 36px; height: 36px;
+            background: ${color};
+            border: 3px solid white;
+            border-radius: 50%;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer;
+            font-size: 14px;
+          ">
+            ${report.severity === 'korban' ? '💀' : '🕳️'}
+          </div>
+        `,
+        iconSize: [36, 36],
+        iconAnchor: [18, 18],
+        popupAnchor: [0, -20]
       });
 
-      const popup = new maplibregl.Popup({ offset: 25, closeButton: false })
-        .setHTML(`
+      const marker = L.marker([report.lat, report.lng], { icon })
+        .bindPopup(`
           <div style="padding:8px;max-width:220px;font-family:Inter,sans-serif;">
             <strong style="font-size:13px;display:block;margin-bottom:4px;">${report.title}</strong>
             <span style="font-size:11px;color:#666;">${report.location}</span>
@@ -362,13 +253,12 @@
               👁️ ${report.views} · ❤️ ${report.reactions} · 💬 ${report.comments}
             </div>
           </div>
-        `);
+        `, { closeButton: false, offset: [0, -10] });
 
-      new maplibregl.Marker({ element: el })
-        .setLngLat([report.lng, report.lat])
-        .setPopup(popup)
-        .addTo(map);
+      marker.addTo(markerLayer);
     });
+
+    markerLayer.addTo(map);
   }
 
   function getSeverityColor(severity: string): string {
@@ -384,7 +274,7 @@
   function selectReport(report: Report) {
     selectedReport = report;
     if (map) {
-      map.flyTo({ center: [report.lng, report.lat], zoom: 15, duration: 800 });
+      map.setView([report.lat, report.lng], 15, { animate: true, duration: 0.8 });
     }
   }
 
@@ -527,13 +417,35 @@
     height: 100%;
   }
 
-  :global(.maplibregl-popup-content) {
+  :global(.leaflet-popup-content-wrapper) {
     border-radius: 12px !important;
     box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
     padding: 0 !important;
   }
-  :global(.maplibregl-popup-tip) {
+  :global(.leaflet-popup-tip) {
     border-top-color: white !important;
+  }
+  :global(.district-label) {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: #90CDF4 !important;
+    font-size: 11px !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.06em !important;
+    text-shadow: 0 0 4px rgba(26, 32, 44, 0.9), 0 0 8px rgba(26, 32, 44, 0.7) !important;
+    white-space: nowrap !important;
+  }
+  :global(.leaflet-control-zoom) {
+    border: 1px solid var(--border-color) !important;
+    border-radius: var(--radius-lg) !important;
+    overflow: hidden;
+  }
+  :global(.leaflet-control-zoom a) {
+    background: var(--bg-card) !important;
+    color: var(--text-primary) !important;
+    border-bottom-color: var(--border-color) !important;
   }
 
   .map-loading {
