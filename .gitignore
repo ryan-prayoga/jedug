@@ -1,0 +1,19 @@
+# General
+.DS_Store
+node_modules/
+dist/
+.env
+.env.local
+
+# Go
+backend/bin/
+backend/tmp/
+backend/vendor/
+
+# Pocketbase / DB Data
+pocketbase/pb_data/
+db_data/
+
+# Svelte
+frontend/.svelte-kit/
+frontend/build/
