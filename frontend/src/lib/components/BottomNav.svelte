@@ -1,38 +1,35 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { Map, Camera, Trophy, User } from 'lucide-svelte';
-
-  const navItems = [
-    { href: '/', label: 'Peta', icon: Map },
-    { href: '/ranking', label: 'Ranking', icon: Trophy },
-    { href: '/profil', label: 'Profil', icon: User }
-  ];
+  import { Map, Camera } from 'lucide-svelte';
 
   $: currentPath = $page.url.pathname;
 </script>
 
 <nav class="bottom-nav">
   <div class="nav-items">
-    {#each navItems as item, i}
-      {#if i === 1}
-        <!-- FAB in the middle -->
-        <a href="/lapor" class="fab" class:active={currentPath === '/lapor'} aria-label="Lapor Jalan Rusak">
-          <div class="fab-inner">
-            <Camera size={24} strokeWidth={2.5} />
-          </div>
-          <span class="fab-label">Lapor</span>
-        </a>
-      {/if}
-      <a
-        href={item.href}
-        class="nav-item"
-        class:active={item.href === '/' ? currentPath === '/' : currentPath.startsWith(item.href)}
-        aria-label={item.label}
-      >
-        <svelte:component this={item.icon} size={22} />
-        <span>{item.label}</span>
-      </a>
-    {/each}
+    <a
+      href="/"
+      class="nav-item"
+      class:active={currentPath === '/'}
+      aria-label="Peta"
+    >
+      <Map size={22} />
+      <span>Peta</span>
+    </a>
+
+    <!-- FAB in the middle -->
+    <a href="/lapor" class="fab" class:active={currentPath === '/lapor'} aria-label="Lapor Jalan Rusak">
+      <div class="fab-inner">
+        <Camera size={24} strokeWidth={2.5} />
+      </div>
+      <span class="fab-label">Lapor</span>
+    </a>
+
+    <!-- Placeholder for balance — will be ranking/profil later -->
+    <div class="nav-item placeholder">
+      <span class="coming-soon-dot"></span>
+      <span>Segera</span>
+    </div>
   </div>
 </nav>
 
@@ -86,6 +83,19 @@
   }
   .nav-item span {
     margin-top: 2px;
+  }
+
+  .nav-item.placeholder {
+    opacity: 0.4;
+    cursor: default;
+    pointer-events: none;
+  }
+  .coming-soon-dot {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 2px dashed var(--border-color-strong);
+    display: block;
   }
 
   /* FAB */

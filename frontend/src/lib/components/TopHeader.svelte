@@ -1,15 +1,13 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import ThemeToggle from './ThemeToggle.svelte';
-  import { Map, Camera, Trophy, User, Menu, X } from 'lucide-svelte';
+  import { Map, Camera } from 'lucide-svelte';
 
   let mobileMenuOpen = false;
 
   const navItems = [
     { href: '/', label: 'Peta', icon: Map },
     { href: '/lapor', label: 'Lapor', icon: Camera },
-    { href: '/ranking', label: 'Ranking', icon: Trophy },
-    { href: '/profil', label: 'Profil', icon: User }
   ];
 
   $: currentPath = $page.url.pathname;

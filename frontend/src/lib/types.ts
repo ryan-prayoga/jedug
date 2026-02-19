@@ -4,6 +4,8 @@ export interface Report {
   description: string;
   lat: number;
   lng: number;
+  latitude: number;
+  longitude: number;
   location: string;
   kecamatan: string;
   kelurahan: string;
@@ -18,6 +20,28 @@ export interface Report {
   createdAt: string;
   daysOld: number;
   estimatedLoss: number;
+  // API fields
+  fingerprint_hash?: string;
+  user_id?: string;
+  district_id?: number;
+  district_name?: string;
+  image_url?: string;
+  road_type?: string;
+  view_count?: number;
+  reaction_count?: number;
+  estimated_loss?: number;
+  days_old?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface Interaction {
+  id: number;
+  report_id: string;
+  fingerprint_hash: string;
+  type: string;
+  value?: string;
+  created_at: string;
 }
 
 export interface KecamatanRank {
@@ -28,6 +52,15 @@ export interface KecamatanRank {
   percentFixed: number;
   trend: "up" | "down" | "stable";
   topSeverity: "ringan" | "sedang" | "berat" | "korban";
+}
+
+export interface KecamatanRankAPI {
+  rank: number;
+  name: string;
+  total_reports: number;
+  total_loss: number;
+  percent_fixed: number;
+  top_severity: number;
 }
 
 export interface UserProfile {
@@ -83,3 +116,35 @@ export const LEVEL_PROGRESSION = [
   { name: "Camat Tangguh", icon: "⭐", minPoints: 1000 },
   { name: "Menteri PU Swasta", icon: "🏗️", minPoints: 2500 },
 ];
+
+// Severity number to label mapping (from API)
+export function severityFromNumber(n: number): Report["severity"] {
+  switch (n) {
+    case 1:
+      return "ringan";
+    case 2:
+      return "sedang";
+    case 3:
+      return "berat";
+    case 4:
+    case 5:
+      return "korban";
+    default:
+      return "ringan";
+  }
+}
+
+export function severityToNumber(s: Report["severity"]): number {
+  switch (s) {
+    case "ringan":
+      return 1;
+    case "sedang":
+      return 2;
+    case "berat":
+      return 3;
+    case "korban":
+      return 5;
+    default:
+      return 1;
+  }
+}

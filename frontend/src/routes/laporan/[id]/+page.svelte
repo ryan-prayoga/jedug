@@ -1,11 +1,72 @@
 <script lang="ts">
   import { page } from '$app/stores';
+  import { onMount } from 'svelte';
   import { dummyReports, formatRupiah, getAgeLabel, getSeverityBadge, getStatusBadge } from '$lib/data/mock';
-  import { ArrowLeft, Heart, Share2, MessageCircle, Eye, MapPin, Clock, Camera, AlertTriangle, Flag, ExternalLink, ChevronLeft, ChevronRight } from 'lucide-svelte';
-  import type { Report } from '$lib/types';
+  import { ArrowLeft, Heart, Share2, MessageCircle, Eye, MapPin, Clock, Camera, AlertTriangle, Flag, ExternalLink, ChevronLeft, ChevronRight, Send, Loader2 } from 'lucide-svelte';
+  import type { Report, Interaction } from '$lib/types';
+  import { api } from '$lib/api/client';
+  import { getDeviceFingerprint } from '$lib/utils/fingerprint';
 
-  $: reportId = $page.params.id;
-  $: report = dummyReports.find(r => r.id === reportId) as Report | undefined;
+  $: reportId = $page.params.id ?? '';
+  
+  // Try API first, fallback to mock data
+  let report: Report | undefined;
+  let loading = true;
+  let apiMode = false;
+  let comments: Interaction[] = [];
+  let fingerprint = '';
+
+  onMount(async () => {
+    fingerprint = await getDeviceFingerprint();
+    
+    try {
+      const result = await api.getReport(reportId);
+      if (result.data) {
+        // Map API data to Report format
+        const d = result.data as any;
+        report = {
+          ...d,
+          title: d.description ? d.description.substring(0, 60) : `Laporan #${d.id.substring(0, 8)}`,
+          description: d.description || 'Tidak ada deskripsi',
+          lat: d.latitude || d.lat,
+          lng: d.longitude || d.lng,
+          location: d.district_name || 'Lokasi tidak diketahui',
+          kecamatan: d.district_name || '',
+          kelurahan: '',
+          severity: severityFromNum(d.severity),
+          status: d.status === 'open' ? 'baru' : d.status === 'fixed' ? 'selesai' : d.status,
+          photos: d.photos || [d.image_url],
+          reporterName: 'Warga',
+          reporterLevel: 'Warga Biasa',
+          reactions: d.reaction_count || 0,
+          comments: 0,
+          views: d.view_count || 0,
+          createdAt: d.created_at,
+          daysOld: d.days_old || Math.floor((Date.now() - new Date(d.created_at).getTime()) / 86400000),
+          estimatedLoss: d.estimated_loss || 0,
+        } as Report;
+        apiMode = true;
+
+        // Load comments
+        try {
+          const commentResult = await api.getComments(reportId);
+          comments = commentResult.data || [];
+        } catch { /* ignore */ }
+      }
+    } catch {
+      // Fallback to mock data
+      report = dummyReports.find(r => r.id === reportId);
+    }
+    
+    loading = false;
+  });
+
+  function severityFromNum(n: number): "ringan" | "sedang" | "berat" | "korban" {
+    if (n >= 4) return 'korban';
+    if (n === 3) return 'berat';
+    if (n === 2) return 'sedang';
+    return 'ringan';
+  }
 
   $: severityBadge = report ? getSeverityBadge(report.severity) : { class: '', label: '' };
   $: statusBadge = report ? getStatusBadge(report.status) : { class: '', label: '' };
@@ -14,6 +75,7 @@
   let liked = false;
   let currentPhotoIdx = 0;
   let commentText = '';
+  let sendingComment = false;
 
   const dummyComments = [
     { name: 'Andi Prasetyo', time: '2 jam lalu', text: 'Ini udah parah banget, kemarin motor saya nyaris jatuh.', level: '👤 Warga' },
@@ -21,8 +83,15 @@
     { name: 'Joko Widodo Jr.', time: '1 hari lalu', text: 'Saya sudah lapor ke kelurahan tapi belum ada tindak lanjut 😤', level: '🏘️ Pak RT' },
   ];
 
-  function toggleLike() {
+  async function toggleLike() {
+    if (!report) return;
     liked = !liked;
+    
+    if (liked && apiMode) {
+      try {
+        await api.addReaction(report.id, fingerprint, 'upvote');
+      } catch { /* ignore */ }
+    }
   }
 
   function shareReport() {
@@ -33,8 +102,30 @@
         url: window.location.href
       }).catch(() => {});
     } else {
-      alert('Link disalin! (Demo Mode)');
+      // Fallback: copy to clipboard
+      navigator.clipboard?.writeText(window.location.href);
+      alert('Link disalin ke clipboard!');
     }
+  }
+
+  async function sendComment() {
+    if (!commentText.trim() || !report || sendingComment) return;
+    
+    sendingComment = true;
+    
+    if (apiMode) {
+      try {
+        const result = await api.addComment(report.id, fingerprint, commentText);
+        if (result.data) {
+          comments = [...comments, result.data];
+        }
+      } catch (err) {
+        console.error('Failed to send comment:', err);
+      }
+    }
+    
+    commentText = '';
+    sendingComment = false;
   }
 
   function nextPhoto() {
@@ -47,13 +138,33 @@
       currentPhotoIdx--;
     }
   }
+
+  function formatTime(dateStr: string): string {
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMin = Math.floor(diffMs / 60000);
+    const diffHour = Math.floor(diffMs / 3600000);
+    const diffDay = Math.floor(diffMs / 86400000);
+    
+    if (diffMin < 1) return 'Baru saja';
+    if (diffMin < 60) return `${diffMin} menit lalu`;
+    if (diffHour < 24) return `${diffHour} jam lalu`;
+    if (diffDay < 30) return `${diffDay} hari lalu`;
+    return date.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
+  }
 </script>
 
 <svelte:head>
   <title>{report ? report.title : 'Laporan'} - JEDUG</title>
 </svelte:head>
 
-{#if report}
+{#if loading}
+  <div class="loading-screen">
+    <div class="loading-spinner"></div>
+    <p>Memuat laporan...</p>
+  </div>
+{:else if report}
   <div class="detail-page">
     <div class="detail-container">
       <!-- Back button -->
@@ -116,7 +227,9 @@
           <MapPin size={16} />
           <div>
             <span class="info-main">{report.location}</span>
-            <span class="info-sub">{report.kelurahan}, {report.kecamatan}</span>
+            {#if report.kelurahan || report.kecamatan}
+              <span class="info-sub">{report.kelurahan}{report.kelurahan && report.kecamatan ? ', ' : ''}{report.kecamatan}</span>
+            {/if}
           </div>
         </div>
 
@@ -150,7 +263,7 @@
           </div>
           <div class="detail-stat">
             <MessageCircle size={16} />
-            <span>{report.comments} komentar</span>
+            <span>{apiMode ? comments.length : report.comments} komentar</span>
           </div>
         </div>
 
@@ -202,7 +315,7 @@
 
         <!-- Comments Section -->
         <div class="comments-section">
-          <h3>💬 Komentar ({dummyComments.length})</h3>
+          <h3>💬 Komentar ({apiMode ? comments.length : dummyComments.length})</h3>
           
           <div class="comment-input-wrapper">
             <input 
@@ -210,23 +323,46 @@
               class="comment-input" 
               placeholder="Tulis komentar..."
               bind:value={commentText}
+              on:keydown={(e) => e.key === 'Enter' && sendComment()}
             />
-            <button class="comment-send" disabled={!commentText.trim()}>
-              Kirim
+            <button class="comment-send" disabled={!commentText.trim() || sendingComment} on:click={sendComment}>
+              {#if sendingComment}
+                <Loader2 size={16} class="spin" />
+              {:else}
+                Kirim
+              {/if}
             </button>
           </div>
 
           <div class="comments-list">
-            {#each dummyComments as comment}
-              <div class="comment-item">
-                <div class="comment-header">
-                  <span class="comment-name">{comment.name}</span>
-                  <span class="comment-level">{comment.level}</span>
-                  <span class="comment-time">{comment.time}</span>
+            {#if apiMode}
+              {#each comments as comment}
+                <div class="comment-item">
+                  <div class="comment-header">
+                    <span class="comment-name">Warga</span>
+                    <span class="comment-level">👤 {comment.fingerprint_hash.substring(0, 8)}</span>
+                    <span class="comment-time">{formatTime(comment.created_at)}</span>
+                  </div>
+                  <p class="comment-text">{comment.value}</p>
                 </div>
-                <p class="comment-text">{comment.text}</p>
-              </div>
-            {/each}
+              {/each}
+              {#if comments.length === 0}
+                <div class="no-comments">
+                  <p>Belum ada komentar. Jadi yang pertama!</p>
+                </div>
+              {/if}
+            {:else}
+              {#each dummyComments as comment}
+                <div class="comment-item">
+                  <div class="comment-header">
+                    <span class="comment-name">{comment.name}</span>
+                    <span class="comment-level">{comment.level}</span>
+                    <span class="comment-time">{comment.time}</span>
+                  </div>
+                  <p class="comment-text">{comment.text}</p>
+                </div>
+              {/each}
+            {/if}
           </div>
         </div>
       </div>
@@ -242,6 +378,27 @@
 {/if}
 
 <style>
+  .loading-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: calc(100dvh - var(--nav-height) - var(--bottom-nav-height));
+    gap: var(--space-md);
+    color: var(--text-secondary);
+  }
+  .loading-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--border-color);
+    border-top-color: var(--color-primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
   .detail-page {
     min-height: calc(100dvh - var(--nav-height) - var(--bottom-nav-height));
     background: var(--bg-secondary);
@@ -618,6 +775,9 @@
     cursor: pointer;
     transition: all var(--transition-fast);
     border: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
   }
   .comment-send:hover {
     background: var(--color-primary-hover);
@@ -667,6 +827,12 @@
     color: var(--text-secondary);
     line-height: var(--leading-relaxed);
   }
+  .no-comments {
+    text-align: center;
+    padding: var(--space-xl);
+    color: var(--text-tertiary);
+    font-size: var(--text-sm);
+  }
 
   /* Not Found */
   .not-found {
@@ -703,6 +869,10 @@
   .nf-link:hover {
     background: var(--color-primary-hover);
     text-decoration: none;
+  }
+
+  :global(.spin) {
+    animation: spin 1s linear infinite;
   }
 
   @media (min-width: 769px) {

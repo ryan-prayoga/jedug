@@ -3,8 +3,10 @@
   import { browser } from '$app/environment';
   import ReportCard from '$lib/components/ReportCard.svelte';
   import { dummyReports } from '$lib/data/mock';
-  import { MapPin, Filter, List, X, ChevronDown, Layers, AlertTriangle } from 'lucide-svelte';
+  import { MapPin, List, X, AlertTriangle, Crosshair, Loader2, Navigation } from 'lucide-svelte';
   import type { Report } from '$lib/types';
+  import { api } from '$lib/api/client';
+  import { severityFromNumber } from '$lib/types';
 
   let mapContainer: HTMLDivElement;
   let map: any;
@@ -13,9 +15,22 @@
   let showSidebar = false;
   let selectedFilter: string = 'semua';
   let selectedReport: Report | null = null;
-  let districtLayer: any = null;
-  let roadLayer: any = null;
   let markerLayer: any = null;
+  let userMarker: any = null;
+  let reports: Report[] = [];
+  let useAPI = false;
+
+  // Location state
+  let locationState: 'idle' | 'requesting' | 'granted' | 'denied' | 'error' = 'idle';
+  let showLocationPrompt = true;
+  let userLat = 0;
+  let userLng = 0;
+  let locationError = '';
+
+  // Map move loading
+  let loadingReports = false;
+  let moveDebounceTimer: any = null;
+  const DEFAULT_RADIUS = 20000; // 20km default radius
 
   const filters = [
     { value: 'semua', label: 'Semua' },
@@ -26,8 +41,8 @@
   ];
 
   $: filteredReports = selectedFilter === 'semua'
-    ? dummyReports
-    : dummyReports.filter(r => r.severity === selectedFilter);
+    ? reports
+    : reports.filter(r => r.severity === selectedFilter);
 
   onMount(async () => {
     if (!browser) return;
@@ -35,9 +50,10 @@
     L = await import('leaflet');
     await import('leaflet/dist/leaflet.css');
 
+    // Initialize map with default center (Tangerang)
     map = L.map(mapContainer, {
       center: [-6.1781, 106.6297],
-      zoom: 12,
+      zoom: 13,
       zoomControl: false,
       attributionControl: false
     });
@@ -48,180 +64,173 @@
       subdomains: 'abcd'
     }).addTo(map);
 
-    // Zoom control kanan atas
     L.control.zoom({ position: 'topright' }).addTo(map);
 
     mapLoaded = true;
-    if (browser) (window as any).__map = map;
 
-    loadDistrictBoundaries();
-    addRoadSegments();
-    addMarkers();
+    // Listen for map moves to load reports in that area
+    map.on('moveend', handleMapMove);
+
+    // Show location prompt — don't auto-request, let user see the instructions first
+    // locationState stays 'idle', showLocationPrompt stays true
   });
 
-  async function loadDistrictBoundaries() {
-    try {
-      const res = await fetch('/api/v1/districts?city=kota-tangerang');
-      if (!res.ok) throw new Error(`Failed to fetch districts: ${res.status}`);
-      const data = await res.json();
-      const geojson = data.geojson ?? data;
-
-      // Hapus layer lama jika ada (HMR reload)
-      if (districtLayer) {
-        map.removeLayer(districtLayer);
-      }
-
-      districtLayer = L.geoJSON(geojson, {
-        style: () => ({
-          fillColor: '#4299E1',
-          fillOpacity: 0.15,
-          color: '#63B3ED',
-          weight: 2,
-          opacity: 0.7
-        }),
-        onEachFeature: (feature: any, layer: any) => {
-          if (feature.properties?.name) {
-            layer.bindTooltip(feature.properties.name.toUpperCase(), {
-              permanent: true,
-              direction: 'center',
-              className: 'district-label'
-            });
-          }
-        }
-      }).addTo(map);
-    } catch (err) {
-      console.error('Failed to load district boundaries:', err);
+  function requestLocation() {
+    if (!navigator.geolocation) {
+      locationState = 'error';
+      locationError = 'Browser kamu tidak mendukung geolokasi.';
+      showLocationPrompt = false;
+      // Load reports for default area
+      loadReportsForArea(-6.1781, 106.6297, DEFAULT_RADIUS);
+      return;
     }
+
+    locationState = 'requesting';
+    showLocationPrompt = false;
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        userLat = position.coords.latitude;
+        userLng = position.coords.longitude;
+        locationState = 'granted';
+
+        // Center map on user
+        if (map) {
+          map.setView([userLat, userLng], 14, { animate: true, duration: 1 });
+          addUserMarker(userLat, userLng);
+        }
+
+        // Load reports near user
+        loadReportsForArea(userLat, userLng, DEFAULT_RADIUS);
+      },
+      (error) => {
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            locationState = 'denied';
+            locationError = 'Akses lokasi ditolak.';
+            break;
+          case error.POSITION_UNAVAILABLE:
+            locationState = 'error';
+            locationError = 'Lokasi tidak tersedia.';
+            break;
+          case error.TIMEOUT:
+            locationState = 'error';
+            locationError = 'Request timeout.';
+            break;
+          default:
+            locationState = 'error';
+            locationError = 'Gagal mendapatkan lokasi.';
+        }
+
+        // Load reports for default area anyway
+        loadReportsForArea(-6.1781, 106.6297, DEFAULT_RADIUS);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 60000
+      }
+    );
   }
 
-  const roadSegments = [
-    { id: 'road-sudirman-1', color: '#38A169', coords: [
-        [106.8019, -6.2270], [106.8022, -6.2250], [106.8025, -6.2230],
-        [106.8029, -6.2210], [106.8033, -6.2190], [106.8038, -6.2170],
-        [106.8042, -6.2150], [106.8046, -6.2130], [106.8050, -6.2110],
-        [106.8054, -6.2090], [106.8058, -6.2070], [106.8062, -6.2050],
-        [106.8066, -6.2030], [106.8069, -6.2010]
-      ]
-    },
-    { id: 'road-thamrin', color: '#ECC94B', coords: [
-        [106.8069, -6.2010], [106.8072, -6.1990], [106.8075, -6.1970],
-        [106.8078, -6.1950], [106.8080, -6.1935], [106.8082, -6.1920],
-        [106.8084, -6.1900], [106.8085, -6.1880], [106.8086, -6.1860],
-        [106.8087, -6.1845], [106.8088, -6.1830]
-      ]
-    },
-    { id: 'road-gatsu-barat', color: '#E53E3E', coords: [
-        [106.7930, -6.1960], [106.7950, -6.1975], [106.7970, -6.1990],
-        [106.7990, -6.2005], [106.8010, -6.2020], [106.8030, -6.2040],
-        [106.8045, -6.2055], [106.8060, -6.2065], [106.8069, -6.2070]
-      ]
-    },
-    { id: 'road-gatsu-timur', color: '#ED8936', coords: [
-        [106.8069, -6.2070], [106.8090, -6.2085], [106.8120, -6.2100],
-        [106.8150, -6.2115], [106.8180, -6.2130], [106.8210, -6.2148],
-        [106.8240, -6.2165], [106.8270, -6.2180], [106.8300, -6.2200],
-        [106.8330, -6.2220], [106.8350, -6.2240], [106.8370, -6.2260],
-        [106.8385, -6.2290], [106.8395, -6.2320], [106.8400, -6.2350]
-      ]
-    },
-    { id: 'road-rasuna', color: '#38A169', coords: [
-        [106.8260, -6.2040], [106.8270, -6.2060], [106.8275, -6.2080],
-        [106.8278, -6.2100], [106.8280, -6.2120], [106.8282, -6.2140],
-        [106.8284, -6.2160], [106.8286, -6.2180], [106.8290, -6.2200],
-        [106.8295, -6.2220], [106.8300, -6.2240], [106.8310, -6.2260]
-      ]
-    },
-    { id: 'road-casablanca', color: '#E53E3E', coords: [
-        [106.8260, -6.2210], [106.8240, -6.2220], [106.8220, -6.2230],
-        [106.8200, -6.2245], [106.8180, -6.2255], [106.8160, -6.2265],
-        [106.8140, -6.2275], [106.8120, -6.2280]
-      ]
-    },
-    { id: 'road-sparman', color: '#38A169', coords: [
-        [106.7930, -6.1960], [106.7910, -6.1945], [106.7890, -6.1930],
-        [106.7870, -6.1915], [106.7850, -6.1900], [106.7830, -6.1885],
-        [106.7810, -6.1870], [106.7790, -6.1855]
-      ]
-    },
-    { id: 'road-monas-barat', color: '#ECC94B', coords: [
-        [106.8220, -6.1770], [106.8220, -6.1790], [106.8220, -6.1810],
-        [106.8220, -6.1830], [106.8220, -6.1850], [106.8220, -6.1870]
-      ]
-    },
-    { id: 'road-monas-timur', color: '#38A169', coords: [
-        [106.8330, -6.1770], [106.8330, -6.1790], [106.8330, -6.1810],
-        [106.8330, -6.1830], [106.8330, -6.1850], [106.8330, -6.1870]
-      ]
-    },
-    { id: 'road-monas-utara', color: '#38A169', coords: [
-        [106.8220, -6.1770], [106.8240, -6.1770], [106.8260, -6.1770],
-        [106.8280, -6.1770], [106.8300, -6.1770], [106.8330, -6.1770]
-      ]
-    },
-    { id: 'road-monas-selatan', color: '#ED8936', coords: [
-        [106.8220, -6.1870], [106.8240, -6.1870], [106.8260, -6.1870],
-        [106.8280, -6.1870], [106.8300, -6.1870], [106.8330, -6.1870]
-      ]
-    },
-    { id: 'road-mtharyono', color: '#1A202C', coords: [
-        [106.8400, -6.2350], [106.8420, -6.2370], [106.8440, -6.2390],
-        [106.8460, -6.2410], [106.8480, -6.2430], [106.8500, -6.2450],
-        [106.8520, -6.2470], [106.8540, -6.2490]
-      ]
-    },
-    { id: 'road-sudirman-2', color: '#ED8936', coords: [
-        [106.8019, -6.2270], [106.8015, -6.2290], [106.8010, -6.2310],
-        [106.8005, -6.2330], [106.8000, -6.2350], [106.7995, -6.2370],
-        [106.7990, -6.2390], [106.7985, -6.2410]
-      ]
-    },
-    { id: 'road-asiaafrika', color: '#38A169', coords: [
-        [106.8019, -6.2270], [106.8040, -6.2265], [106.8060, -6.2260],
-        [106.8080, -6.2255], [106.8100, -6.2250], [106.8120, -6.2250],
-        [106.8140, -6.2250]
-      ]
-    },
-    { id: 'road-satrio', color: '#E53E3E', coords: [
-        [106.8210, -6.2148], [106.8230, -6.2130], [106.8250, -6.2110],
-        [106.8260, -6.2090], [106.8260, -6.2070], [106.8260, -6.2040]
-      ]
-    }
-  ];
+  function addUserMarker(lat: number, lng: number) {
+    if (userMarker) map.removeLayer(userMarker);
 
-  function addRoadSegments() {
-    if (roadLayer) map.removeLayer(roadLayer);
-
-    roadLayer = L.layerGroup();
-
-    roadSegments.forEach(segment => {
-      // Leaflet coords = [lat, lng] bukan [lng, lat]
-      const latLngs = segment.coords.map(c => [c[1], c[0]] as [number, number]);
-
-      // Glow
-      L.polyline(latLngs, {
-        color: segment.color,
-        weight: 16,
-        opacity: 0.3
-      }).addTo(roadLayer);
-
-      // Main line
-      L.polyline(latLngs, {
-        color: segment.color,
-        weight: 6,
-        opacity: 0.9,
-        lineCap: 'round',
-        lineJoin: 'round'
-      }).addTo(roadLayer);
+    const icon = L.divIcon({
+      className: 'user-location-marker',
+      html: `
+        <div class="user-dot-wrapper">
+          <div class="user-dot-pulse"></div>
+          <div class="user-dot"></div>
+        </div>
+      `,
+      iconSize: [24, 24],
+      iconAnchor: [12, 12]
     });
 
-    roadLayer.addTo(map);
+    userMarker = L.marker([lat, lng], { icon, zIndexOffset: 1000 }).addTo(map);
+  }
+
+  function handleMapMove() {
+    if (!map || loadingReports) return;
+
+    // Debounce to avoid too many requests
+    clearTimeout(moveDebounceTimer);
+    moveDebounceTimer = setTimeout(() => {
+      const center = map.getCenter();
+      const bounds = map.getBounds();
+      
+      // Calculate visible radius from bounds
+      const ne = bounds.getNorthEast();
+      const sw = bounds.getSouthWest();
+      const latDiff = Math.abs(ne.lat - sw.lat);
+      const lngDiff = Math.abs(ne.lng - sw.lng);
+      const maxDiff = Math.max(latDiff, lngDiff);
+      // Rough km per degree ~111km at equator
+      const radiusKm = (maxDiff / 2) * 111;
+      const radiusMeters = Math.min(radiusKm * 1000, 50000); // Max 50km
+
+      loadReportsForArea(center.lat, center.lng, radiusMeters);
+    }, 700);
+  }
+
+  async function loadReportsForArea(lat: number, lng: number, radius: number) {
+    loadingReports = true;
+    
+    try {
+      const result = await api.getNearbyReports(lat, lng, radius);
+      if (result.data && result.data.length > 0) {
+        reports = result.data.map(mapAPIReportToLocal);
+        useAPI = true;
+        addMarkers();
+      } else if (!useAPI) {
+        // First load with no API data — show mock data
+        reports = dummyReports;
+        addMarkers();
+      }
+    } catch {
+      if (!useAPI && reports.length === 0) {
+        // API failed, use mock data as fallback
+        reports = dummyReports;
+        addMarkers();
+        console.log('Using mock data (API not available)');
+      }
+    }
+    
+    loadingReports = false;
+  }
+
+  function mapAPIReportToLocal(d: any): Report {
+    return {
+      ...d,
+      id: d.id,
+      title: d.description ? d.description.substring(0, 60) : `Laporan #${d.id.substring(0, 8)}`,
+      description: d.description || '',
+      lat: d.latitude || d.lat,
+      lng: d.longitude || d.lng,
+      location: d.district_name || 'Lokasi',
+      kecamatan: d.district_name || '',
+      kelurahan: '',
+      severity: severityFromNumber(d.severity),
+      status: d.status === 'open' ? 'baru' : d.status === 'fixed' ? 'selesai' : d.status,
+      photos: d.photos || [d.image_url],
+      reporterName: 'Warga',
+      reporterLevel: 'Warga Biasa',
+      reactions: d.reaction_count || 0,
+      comments: 0,
+      views: d.view_count || 0,
+      createdAt: d.created_at,
+      daysOld: d.days_old || Math.floor((Date.now() - new Date(d.created_at).getTime()) / 86400000),
+      estimatedLoss: d.estimated_loss || 0,
+    };
   }
 
   function addMarkers() {
+    if (!L || !map) return;
     if (markerLayer) map.removeLayer(markerLayer);
     markerLayer = L.layerGroup();
 
-    dummyReports.forEach(report => {
+    reports.forEach(report => {
       const color = getSeverityColor(report.severity);
       const icon = L.divIcon({
         className: 'custom-marker',
@@ -255,6 +264,10 @@
           </div>
         `, { closeButton: false, offset: [0, -10] });
 
+      marker.on('click', () => {
+        selectedReport = report;
+      });
+
       marker.addTo(markerLayer);
     });
 
@@ -278,7 +291,16 @@
     }
   }
 
+  function goToMyLocation() {
+    if (userLat && userLng && map) {
+      map.setView([userLat, userLng], 14, { animate: true, duration: 0.8 });
+    } else {
+      requestLocation();
+    }
+  }
+
   onDestroy(() => {
+    clearTimeout(moveDebounceTimer);
     if (map) map.remove();
   });
 </script>
@@ -299,14 +321,73 @@
       </div>
     {/if}
 
+    <!-- Location Permission Prompt -->
+    {#if showLocationPrompt && locationState === 'idle'}
+      <div class="location-prompt">
+        <div class="prompt-card">
+          <div class="prompt-icon">📍</div>
+          <h3>Izinkan Akses Lokasi</h3>
+          <p>JEDUG membutuhkan lokasi untuk menampilkan <strong>lubang jalan di sekitar kamu</strong> (radius 20km).</p>
+          <div class="prompt-steps">
+            <div class="step-item">
+              <span class="step-num">1</span>
+              <span>Tekan tombol di bawah</span>
+            </div>
+            <div class="step-item">
+              <span class="step-num">2</span>
+              <span>Browser akan minta izin — tekan <strong>"Allow"</strong> atau <strong>"Izinkan"</strong></span>
+            </div>
+            <div class="step-item">
+              <span class="step-num">3</span>
+              <span>Peta otomatis pindah ke lokasi kamu</span>
+            </div>
+          </div>
+          <button class="prompt-btn" on:click={requestLocation}>
+            <Navigation size={18} />
+            Gunakan Lokasi Saya
+          </button>
+          <button class="prompt-skip" on:click={() => { showLocationPrompt = false; loadReportsForArea(-6.1781, 106.6297, DEFAULT_RADIUS); }}>
+            Lewati, lihat peta Tangerang
+          </button>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Location Requesting Overlay -->
+    {#if locationState === 'requesting'}
+      <div class="location-requesting">
+        <div class="requesting-card">
+          <div class="requesting-spinner"></div>
+          <p>Mendeteksi lokasi kamu...</p>
+          <span class="requesting-hint">Jika muncul popup, tekan <strong>"Allow"</strong></span>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Location Denied Banner -->
+    {#if locationState === 'denied'}
+      <div class="location-denied-banner">
+        <div class="denied-content">
+          <span>📍 Lokasi ditolak</span>
+          <p>Buka Settings → Privacy → Location, lalu izinkan browser ini mengakses lokasi.</p>
+        </div>
+        <button class="denied-retry" on:click={requestLocation}>Coba Lagi</button>
+      </div>
+    {/if}
+
     <!-- Map Controls (Mobile) -->
-    <div class="map-controls hide-desktop">
-      <button class="map-btn" on:click={() => showSidebar = !showSidebar}>
+    <div class="map-controls">
+      <button class="map-btn" on:click={() => showSidebar = !showSidebar} aria-label="Toggle daftar laporan">
         {#if showSidebar}
           <X size={20} />
         {:else}
           <List size={20} />
         {/if}
+      </button>
+
+      <!-- My Location Button -->
+      <button class="map-btn location-btn-map" on:click={goToMyLocation} aria-label="Ke lokasi saya" class:active={locationState === 'granted'}>
+        <Crosshair size={20} />
       </button>
     </div>
 
@@ -325,39 +406,41 @@
 
     <!-- Stats Overlay -->
     <div class="stats-overlay">
+      {#if loadingReports}
+        <div class="stat-pill loading">
+          <Loader2 size={14} class="spin-icon" />
+          <span>Memuat...</span>
+        </div>
+      {/if}
       <div class="stat-pill danger">
         <AlertTriangle size={14} />
-        <span>{dummyReports.filter(r => r.severity === 'berat' || r.severity === 'korban').length} Parah</span>
+        <span>{reports.filter(r => r.severity === 'berat' || r.severity === 'korban').length} Parah</span>
       </div>
       <div class="stat-pill">
         <MapPin size={14} />
-        <span>{dummyReports.length} Laporan</span>
+        <span>{reports.length} Laporan</span>
       </div>
     </div>
 
     <!-- Legend -->
     <div class="map-legend">
-      <div class="legend-title">Kondisi Jalan</div>
+      <div class="legend-title">Tingkat Kerusakan</div>
       <div class="legend-items">
         <div class="legend-item">
-          <span class="legend-line" style="background: #38A169;"></span>
-          <span>Aman</span>
+          <span class="legend-dot" style="background: #ECC94B;"></span>
+          <span>Ringan</span>
         </div>
         <div class="legend-item">
-          <span class="legend-line" style="background: #ECC94B;"></span>
-          <span>Rusak Ringan</span>
+          <span class="legend-dot" style="background: #ED8936;"></span>
+          <span>Sedang</span>
         </div>
         <div class="legend-item">
-          <span class="legend-line" style="background: #ED8936;"></span>
-          <span>Rusak Sedang</span>
+          <span class="legend-dot" style="background: #E53E3E;"></span>
+          <span>Berat</span>
         </div>
         <div class="legend-item">
-          <span class="legend-line" style="background: #E53E3E;"></span>
-          <span>Rusak Berat</span>
-        </div>
-        <div class="legend-item">
-          <span class="legend-line" style="background: #1A202C;"></span>
-          <span>Ada Korban</span>
+          <span class="legend-dot" style="background: #1A202C; border: 1px solid #666;"></span>
+          <span>Korban</span>
         </div>
       </div>
     </div>
@@ -381,7 +464,12 @@
       {#if filteredReports.length === 0}
         <div class="empty-state">
           <span class="empty-icon">🔍</span>
-          <p>Tidak ada laporan dengan filter ini</p>
+          {#if loadingReports}
+            <p>Memuat laporan sekitar...</p>
+          {:else}
+            <p>Tidak ada laporan di area ini</p>
+            <p class="empty-hint">Coba geser peta ke area lain</p>
+          {/if}
         </div>
       {/if}
     </div>
@@ -425,18 +513,6 @@
   :global(.leaflet-popup-tip) {
     border-top-color: white !important;
   }
-  :global(.district-label) {
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    color: #90CDF4 !important;
-    font-size: 11px !important;
-    font-weight: 700 !important;
-    text-transform: uppercase !important;
-    letter-spacing: 0.06em !important;
-    text-shadow: 0 0 4px rgba(26, 32, 44, 0.9), 0 0 8px rgba(26, 32, 44, 0.7) !important;
-    white-space: nowrap !important;
-  }
   :global(.leaflet-control-zoom) {
     border: 1px solid var(--border-color) !important;
     border-radius: var(--radius-lg) !important;
@@ -448,6 +524,43 @@
     border-bottom-color: var(--border-color) !important;
   }
 
+  /* User Location Marker */
+  :global(.user-dot-wrapper) {
+    position: relative;
+    width: 24px;
+    height: 24px;
+  }
+  :global(.user-dot) {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 14px;
+    height: 14px;
+    background: #4285F4;
+    border: 3px solid white;
+    border-radius: 50%;
+    box-shadow: 0 2px 6px rgba(66, 133, 244, 0.5);
+    z-index: 2;
+  }
+  :global(.user-dot-pulse) {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 40px;
+    height: 40px;
+    background: rgba(66, 133, 244, 0.2);
+    border-radius: 50%;
+    animation: pulse 2s ease-out infinite;
+    z-index: 1;
+  }
+  @keyframes pulse {
+    0% { transform: translate(-50%, -50%) scale(0.5); opacity: 1; }
+    100% { transform: translate(-50%, -50%) scale(1.5); opacity: 0; }
+  }
+
+  /* Map Loading */
   .map-loading {
     position: absolute;
     inset: 0;
@@ -472,12 +585,202 @@
     to { transform: rotate(360deg); }
   }
 
+  /* Location Prompt */
+  .location-prompt {
+    position: absolute;
+    inset: 0;
+    z-index: 1100;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-lg);
+  }
+  .prompt-card {
+    background: var(--bg-card);
+    border-radius: var(--radius-2xl);
+    padding: var(--space-2xl);
+    max-width: 400px;
+    width: 100%;
+    text-align: center;
+    box-shadow: var(--shadow-xl);
+    border: 1px solid var(--border-color);
+    animation: slideUp 0.4s ease;
+  }
+  @keyframes slideUp {
+    from { transform: translateY(20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  .prompt-icon {
+    font-size: 3rem;
+    margin-bottom: var(--space-md);
+  }
+  .prompt-card h3 {
+    font-size: var(--text-xl);
+    font-weight: var(--font-bold);
+    margin-bottom: var(--space-sm);
+    color: var(--text-primary);
+  }
+  .prompt-card > p {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    line-height: var(--leading-relaxed);
+    margin-bottom: var(--space-xl);
+  }
+  .prompt-steps {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-xl);
+    text-align: left;
+  }
+  .step-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+  }
+  .step-num {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--color-primary);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--text-xs);
+    font-weight: var(--font-bold);
+    flex-shrink: 0;
+  }
+  .prompt-btn {
+    width: 100%;
+    padding: 0.875rem 1.5rem;
+    background: var(--color-primary);
+    color: white;
+    border: none;
+    border-radius: var(--radius-xl);
+    font-size: var(--text-base);
+    font-weight: var(--font-semibold);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-sm);
+    transition: all var(--transition-fast);
+    margin-bottom: var(--space-md);
+  }
+  .prompt-btn:hover {
+    background: var(--color-primary-hover);
+  }
+  .prompt-btn:active {
+    transform: scale(0.98);
+  }
+  .prompt-skip {
+    background: none;
+    border: none;
+    color: var(--text-tertiary);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    text-decoration: underline;
+    padding: var(--space-xs);
+  }
+  .prompt-skip:hover {
+    color: var(--text-secondary);
+  }
+
+  /* Location Requesting */
+  .location-requesting {
+    position: absolute;
+    top: var(--space-lg);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1100;
+    animation: slideDown 0.3s ease;
+  }
+  @keyframes slideDown {
+    from { transform: translateX(-50%) translateY(-10px); opacity: 0; }
+    to { transform: translateX(-50%) translateY(0); opacity: 1; }
+  }
+  .requesting-card {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    padding: var(--space-md) var(--space-lg);
+    background: var(--bg-card);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-lg);
+    border: 1px solid var(--border-color);
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+  }
+  .requesting-spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--border-color);
+    border-top-color: var(--color-primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  .requesting-hint {
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+    margin-left: var(--space-sm);
+  }
+
+  /* Location Denied Banner */
+  .location-denied-banner {
+    position: absolute;
+    top: var(--space-md);
+    left: var(--space-md);
+    right: var(--space-md);
+    z-index: 1050;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
+    padding: var(--space-md) var(--space-lg);
+    background: var(--color-warning-light);
+    border: 1px solid var(--color-warning);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-md);
+    animation: slideDown 0.3s ease;
+  }
+  .denied-content span {
+    font-size: var(--text-sm);
+    font-weight: var(--font-semibold);
+    color: var(--text-primary);
+  }
+  .denied-content p {
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    margin-top: 2px;
+    line-height: var(--leading-relaxed);
+  }
+  .denied-retry {
+    padding: 0.5rem 1rem;
+    background: var(--color-primary);
+    color: white;
+    border: none;
+    border-radius: var(--radius-lg);
+    font-size: var(--text-xs);
+    font-weight: var(--font-semibold);
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
   /* Map Controls */
   .map-controls {
     position: absolute;
     top: var(--space-md);
     left: var(--space-md);
-    z-index: 10;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
   }
   .map-btn {
     width: 44px;
@@ -491,9 +794,14 @@
     box-shadow: var(--shadow-md);
     border: 1px solid var(--border-color);
     cursor: pointer;
+    transition: all var(--transition-fast);
   }
   .map-btn:active {
     transform: scale(0.95);
+  }
+  .map-btn.location-btn-map.active {
+    color: #4285F4;
+    border-color: #4285F4;
   }
 
   /* Filter Bar */
@@ -510,7 +818,7 @@
     border-radius: var(--radius-full);
     box-shadow: var(--shadow-lg);
     border: 1px solid var(--border-color);
-    z-index: 10;
+    z-index: 1000;
     max-width: calc(100% - 2rem);
     overflow-x: auto;
     scrollbar-width: none;
@@ -544,7 +852,7 @@
     right: 80px;
     display: flex;
     gap: var(--space-xs);
-    z-index: 10;
+    z-index: 1000;
   }
   .stat-pill {
     display: flex;
@@ -565,6 +873,14 @@
     color: var(--color-danger);
     border-color: transparent;
   }
+  .stat-pill.loading {
+    background: var(--color-primary-light);
+    color: var(--color-primary);
+    border-color: transparent;
+  }
+  :global(.spin-icon) {
+    animation: spin 1s linear infinite;
+  }
 
   /* Legend */
   .map-legend {
@@ -577,7 +893,7 @@
     padding: var(--space-sm) var(--space-md);
     box-shadow: var(--shadow-md);
     border: 1px solid var(--border-color);
-    z-index: 10;
+    z-index: 1000;
     font-size: var(--text-xs);
   }
   .legend-title {
@@ -597,10 +913,10 @@
     gap: var(--space-sm);
     color: var(--text-secondary);
   }
-  .legend-line {
-    width: 20px;
-    height: 4px;
-    border-radius: 2px;
+  .legend-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
     flex-shrink: 0;
   }
 
@@ -614,7 +930,7 @@
       left: var(--space-sm);
       padding: var(--space-xs) var(--space-sm);
       font-size: 0.65rem;
-      max-width: 130px;
+      max-width: 120px;
     }
 
     .filter-bar {
@@ -638,6 +954,11 @@
     .stat-pill {
       font-size: 0.65rem;
       padding: 0.25rem 0.5rem;
+    }
+
+    .location-denied-banner {
+      flex-direction: column;
+      align-items: flex-start;
     }
   }
 
@@ -700,6 +1021,12 @@
     font-size: 2.5rem;
     margin-bottom: var(--space-md);
   }
+  .empty-hint {
+    font-size: var(--text-xs);
+    margin-top: var(--space-xs);
+    color: var(--text-tertiary);
+    opacity: 0.7;
+  }
 
   /* Mobile Sidebar */
   @media (max-width: 768px) {
@@ -747,4 +1074,3 @@
     margin: 0 auto var(--space-md);
   }
 </style>
-

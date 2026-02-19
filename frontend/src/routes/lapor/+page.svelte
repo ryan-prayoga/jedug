@@ -1,13 +1,25 @@
 <script lang="ts">
-  import { Camera, MapPin, AlertTriangle, Send, X, ChevronDown, Info, Crosshair } from 'lucide-svelte';
+  import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { Camera, MapPin, AlertTriangle, Send, X, ChevronDown, Info, Crosshair, Loader2, CheckCircle } from 'lucide-svelte';
+  import { compressImage, blobToDataURL, formatFileSize } from '$lib/utils/imageCompression';
+  import { getDeviceFingerprint } from '$lib/utils/fingerprint';
+  import { api } from '$lib/api/client';
+  import { severityToNumber } from '$lib/types';
 
-  let photos: string[] = [];
+  let photos: { preview: string; blob: Blob; originalSize: number; compressedSize: number }[] = [];
   let severity: string = '';
   let description: string = '';
   let agreedTos = false;
   let isLocating = false;
   let locationText = '';
   let step = 1; // 1=foto, 2=detail, 3=konfirmasi
+  let isSubmitting = false;
+  let submitSuccess = false;
+  let submitError = '';
+  let userLat = 0;
+  let userLng = 0;
+  let fingerprint = '';
 
   const severityOptions = [
     { value: 'ringan', label: 'Rusak Ringan', icon: '🟡', desc: 'Retakan kecil, masih bisa dilewati' },
@@ -16,19 +28,36 @@
     { value: 'korban', label: 'Ada Korban', icon: '💀', desc: 'Sudah ada korban kecelakaan' }
   ];
 
-  function handleFileSelect(e: Event) {
+  onMount(async () => {
+    fingerprint = await getDeviceFingerprint();
+  });
+
+  async function handleFileSelect(e: Event) {
     const input = e.target as HTMLInputElement;
     if (!input.files) return;
     const files = Array.from(input.files);
-    files.forEach(file => {
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        if (ev.target?.result) {
-          photos = [...photos, ev.target.result as string];
-        }
-      };
-      reader.readAsDataURL(file);
-    });
+    
+    for (const file of files) {
+      if (photos.length >= 3) break;
+      
+      try {
+        const originalSize = file.size;
+        const compressed = await compressImage(file);
+        const preview = await blobToDataURL(compressed);
+        
+        photos = [...photos, {
+          preview,
+          blob: compressed,
+          originalSize,
+          compressedSize: compressed.size
+        }];
+      } catch (err) {
+        console.error('Failed to compress image:', err);
+      }
+    }
+    
+    // Reset input so same file can be selected again
+    input.value = '';
   }
 
   function removePhoto(index: number) {
@@ -36,12 +65,52 @@
   }
 
   function getLocation() {
+    if (!navigator.geolocation) {
+      locationText = 'Geolokasi tidak didukung di perangkat ini';
+      return;
+    }
+
     isLocating = true;
-    // Simulate location detection
-    setTimeout(() => {
-      locationText = 'Jl. Sudirman No. 45, Tanah Abang, Jakarta Pusat';
-      isLocating = false;
-    }, 1500);
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        userLat = position.coords.latitude;
+        userLng = position.coords.longitude;
+        
+        // Try reverse geocode via Nominatim (free)
+        try {
+          const res = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?lat=${userLat}&lon=${userLng}&format=json&accept-language=id`
+          );
+          const data = await res.json();
+          locationText = data.display_name || `${userLat.toFixed(6)}, ${userLng.toFixed(6)}`;
+        } catch {
+          locationText = `${userLat.toFixed(6)}, ${userLng.toFixed(6)}`;
+        }
+        
+        isLocating = false;
+      },
+      (error) => {
+        isLocating = false;
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            locationText = 'Akses lokasi ditolak. Aktifkan GPS.';
+            break;
+          case error.POSITION_UNAVAILABLE:
+            locationText = 'Lokasi tidak tersedia.';
+            break;
+          case error.TIMEOUT:
+            locationText = 'Timeout. Coba lagi.';
+            break;
+          default:
+            locationText = 'Gagal mendapatkan lokasi.';
+        }
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0
+      }
+    );
   }
 
   function nextStep() {
@@ -52,234 +121,303 @@
     if (step > 1) step--;
   }
 
-  function submitReport() {
-    alert('Laporan berhasil dikirim! (Demo Mode)');
-    // Reset form
-    photos = [];
-    severity = '';
-    description = '';
-    agreedTos = false;
-    locationText = '';
-    step = 1;
+  async function submitReport() {
+    if (isSubmitting) return;
+    
+    isSubmitting = true;
+    submitError = '';
+    
+    try {
+      // 1. Upload photos
+      let imageUrl = '';
+      if (photos.length > 0) {
+        const uploadResult = await api.uploadImage(photos[0].blob);
+        imageUrl = uploadResult.url;
+      }
+
+      // 2. Upload additional photos as proofs (if any)
+      // For now, we only use the first photo as main image
+
+      // 3. Create report via API
+      const result = await api.createReport({
+        fingerprint_hash: fingerprint,
+        latitude: userLat,
+        longitude: userLng,
+        image_url: imageUrl,
+        severity: severityToNumber(severity as any),
+        description: description || undefined,
+      });
+
+      submitSuccess = true;
+      
+      // Redirect after 2 seconds
+      setTimeout(() => {
+        goto('/');
+      }, 2000);
+      
+    } catch (err: any) {
+      submitError = err.message || 'Gagal mengirim laporan. Coba lagi.';
+    } finally {
+      isSubmitting = false;
+    }
   }
+
+  $: totalSaved = photos.reduce((sum, p) => sum + (p.originalSize - p.compressedSize), 0);
 </script>
 
 <svelte:head>
   <title>JEDUG - Lapor Jalan Rusak</title>
 </svelte:head>
 
-<div class="report-page">
-  <div class="report-container">
-    <!-- Progress Steps -->
-    <div class="progress-bar">
-      {#each [1, 2, 3] as s}
-        <div class="progress-step" class:active={step >= s} class:current={step === s}>
-          <div class="step-circle">{s}</div>
-          <span class="step-label">
-            {s === 1 ? 'Foto' : s === 2 ? 'Detail' : 'Kirim'}
-          </span>
-        </div>
-        {#if s < 3}
-          <div class="progress-line" class:active={step > s}></div>
-        {/if}
-      {/each}
-    </div>
-
-    <!-- Step 1: Photo -->
-    {#if step === 1}
-      <div class="step-content">
-        <div class="step-header">
-          <h2>📸 Ambil Foto</h2>
-          <p>Foto jalan rusak langsung dari kamera (wajib minimal 1 foto)</p>
-        </div>
-
-        <div class="photo-grid">
-          {#each photos as photo, i}
-            <div class="photo-item">
-              <img src={photo} alt="Foto {i + 1}" />
-              <button class="photo-remove" on:click={() => removePhoto(i)}>
-                <X size={14} />
-              </button>
-            </div>
-          {/each}
-
-          {#if photos.length < 3}
-            <label class="photo-add">
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                on:change={handleFileSelect}
-                hidden
-              />
-              <div class="add-icon">
-                <Camera size={32} />
-                <span>Ambil Foto</span>
-              </div>
-            </label>
-
-          {/if}
-        </div>
-
-        <div class="info-box">
-          <Info size={16} />
-          <span>Foto akan dikompresi otomatis ke WebP untuk menghemat data. Maksimal 3 foto.</span>
-        </div>
+{#if submitSuccess}
+  <div class="report-page">
+    <div class="success-screen">
+      <div class="success-icon">
+        <CheckCircle size={64} />
       </div>
-    {/if}
-
-    <!-- Step 2: Detail -->
-    {#if step === 2}
-      <div class="step-content">
-        <div class="step-header">
-          <h2>📋 Detail Laporan</h2>
-          <p>Lengkapi informasi kerusakan jalan</p>
-        </div>
-
-        <!-- Location -->
-        <div class="form-group">
-          <label class="form-label">
-            <MapPin size={16} />
-            Lokasi
-          </label>
-          <div class="location-input">
-            <input
-              type="text"
-              class="form-input"
-              placeholder="Deteksi lokasi otomatis..."
-              bind:value={locationText}
-              readonly
-            />
-            <button class="location-btn" on:click={getLocation} disabled={isLocating}>
-              {#if isLocating}
-                <div class="mini-spinner"></div>
-              {:else}
-                <Crosshair size={18} />
-              {/if}
-            </button>
-          </div>
-          <span class="form-hint">GPS harus aktif. Laporan harus dari lokasi (maks 20m)</span>
-        </div>
-
-        <!-- Severity -->
-        <div class="form-group">
-          <label class="form-label">
-            <AlertTriangle size={16} />
-            Tingkat Kerusakan
-          </label>
-          <div class="severity-grid">
-            {#each severityOptions as opt}
-              <button
-                class="severity-card"
-                class:selected={severity === opt.value}
-                on:click={() => severity = opt.value}
-              >
-                <span class="severity-icon">{opt.icon}</span>
-                <span class="severity-label">{opt.label}</span>
-                <span class="severity-desc">{opt.desc}</span>
-              </button>
-            {/each}
-          </div>
-        </div>
-
-        <!-- Description -->
-        <div class="form-group">
-          <label class="form-label" for="desc-input">
-            📝 Deskripsi
-          </label>
-          <textarea
-            id="desc-input"
-            class="form-textarea"
-            placeholder="Ceritakan kondisi jalannya... (opsional tapi membantu)"
-            rows="3"
-            bind:value={description}
-            maxlength="500"
-          ></textarea>
-          <span class="form-hint">{description.length}/500 karakter</span>
-        </div>
-      </div>
-    {/if}
-
-    <!-- Step 3: Confirm -->
-    {#if step === 3}
-      <div class="step-content">
-        <div class="step-header">
-          <h2>✅ Konfirmasi Laporan</h2>
-          <p>Periksa kembali sebelum mengirim</p>
-        </div>
-
-        <div class="preview-card">
-          <!-- Photos preview -->
-          {#if photos.length > 0}
-            <div class="preview-photos">
-              {#each photos as photo, i}
-                <img src={photo} alt="Preview {i + 1}" class="preview-img" />
-              {/each}
-            </div>
-          {:else}
-            <div class="preview-no-photo">
-              <Camera size={48} />
-              <p>Belum ada foto</p>
-            </div>
-          {/if}
-
-          <div class="preview-info">
-            <div class="preview-row">
-              <span class="preview-label">📍 Lokasi</span>
-              <span class="preview-value">{locationText || 'Belum dideteksi'}</span>
-            </div>
-            <div class="preview-row">
-              <span class="preview-label">⚠️ Tingkat</span>
-              <span class="preview-value">
-                {severityOptions.find(o => o.value === severity)?.label || 'Belum dipilih'}
-              </span>
-            </div>
-            {#if description}
-              <div class="preview-row">
-                <span class="preview-label">📝 Deskripsi</span>
-                <span class="preview-value">{description}</span>
-              </div>
-            {/if}
-          </div>
-        </div>
-
-        <label class="tos-checkbox">
-          <input type="checkbox" bind:checked={agreedTos} />
-          <span class="checkmark"></span>
-          <span>Saya bertanggung jawab atas kebenaran data yang dilaporkan dan setuju dengan S&K JEDUG.</span>
-        </label>
-      </div>
-    {/if}
-
-    <!-- Actions -->
-    <div class="form-actions">
-      {#if step > 1}
-        <button class="btn btn-secondary" on:click={prevStep}>
-          Kembali
-        </button>
-      {/if}
-
-      {#if step < 3}
-        <button
-          class="btn btn-primary"
-          on:click={nextStep}
-          disabled={step === 1 && photos.length === 0}
-        >
-          Lanjut
-        </button>
-      {:else}
-        <button
-          class="btn btn-primary btn-submit"
-          on:click={submitReport}
-          disabled={!agreedTos}
-        >
-          <Send size={18} />
-          Kirim Laporan
-        </button>
-      {/if}
+      <h2>Laporan Berhasil Dikirim! 🎉</h2>
+      <p>Terima kasih sudah jadi warga peduli. Laporanmu akan membantu menekan pemerintah untuk bertindak.</p>
+      <p class="redirect-text">Mengalihkan ke peta...</p>
     </div>
   </div>
-</div>
+{:else}
+  <div class="report-page">
+    <div class="report-container">
+      <!-- Progress Steps -->
+      <div class="progress-bar">
+        {#each [1, 2, 3] as s}
+          <div class="progress-step" class:active={step >= s} class:current={step === s}>
+            <div class="step-circle">{s}</div>
+            <span class="step-label">
+              {s === 1 ? 'Foto' : s === 2 ? 'Detail' : 'Kirim'}
+            </span>
+          </div>
+          {#if s < 3}
+            <div class="progress-line" class:active={step > s}></div>
+          {/if}
+        {/each}
+      </div>
+
+      <!-- Step 1: Photo -->
+      {#if step === 1}
+        <div class="step-content">
+          <div class="step-header">
+            <h2>📸 Ambil Foto</h2>
+            <p>Foto jalan rusak langsung dari kamera (wajib minimal 1 foto)</p>
+          </div>
+
+          <div class="photo-grid">
+            {#each photos as photo, i}
+              <div class="photo-item">
+                <img src={photo.preview} alt="Foto {i + 1}" />
+                <button class="photo-remove" on:click={() => removePhoto(i)}>
+                  <X size={14} />
+                </button>
+                <div class="photo-size">
+                  {formatFileSize(photo.compressedSize)}
+                </div>
+              </div>
+            {/each}
+
+            {#if photos.length < 3}
+              <label class="photo-add">
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  on:change={handleFileSelect}
+                  hidden
+                />
+                <div class="add-icon">
+                  <Camera size={32} />
+                  <span>Ambil Foto</span>
+                </div>
+              </label>
+            {/if}
+          </div>
+
+          {#if totalSaved > 0}
+            <div class="compression-info">
+              <CheckCircle size={16} />
+              <span>Gambar otomatis dikompresi ke WebP. Hemat {formatFileSize(totalSaved)} data!</span>
+            </div>
+          {/if}
+
+          <div class="info-box">
+            <Info size={16} />
+            <span>Foto akan dikompresi otomatis ke WebP (max 1080px, 80% quality) untuk menghemat data. Maksimal 3 foto.</span>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Step 2: Detail -->
+      {#if step === 2}
+        <div class="step-content">
+          <div class="step-header">
+            <h2>📋 Detail Laporan</h2>
+            <p>Lengkapi informasi kerusakan jalan</p>
+          </div>
+
+          <!-- Location -->
+          <div class="form-group">
+            <label class="form-label">
+              <MapPin size={16} />
+              Lokasi
+            </label>
+            <div class="location-input">
+              <input
+                type="text"
+                class="form-input"
+                placeholder="Deteksi lokasi otomatis..."
+                bind:value={locationText}
+                readonly
+              />
+              <button class="location-btn" on:click={getLocation} disabled={isLocating}>
+                {#if isLocating}
+                  <div class="mini-spinner"></div>
+                {:else}
+                  <Crosshair size={18} />
+                {/if}
+              </button>
+            </div>
+            <span class="form-hint">GPS harus aktif. Laporan harus dari lokasi (maks 20m)</span>
+            {#if userLat && userLng}
+              <span class="form-hint coordinate">📍 {userLat.toFixed(6)}, {userLng.toFixed(6)}</span>
+            {/if}
+          </div>
+
+          <!-- Severity -->
+          <div class="form-group">
+            <label class="form-label">
+              <AlertTriangle size={16} />
+              Tingkat Kerusakan
+            </label>
+            <div class="severity-grid">
+              {#each severityOptions as opt}
+                <button
+                  class="severity-card"
+                  class:selected={severity === opt.value}
+                  on:click={() => severity = opt.value}
+                >
+                  <span class="severity-icon">{opt.icon}</span>
+                  <span class="severity-label">{opt.label}</span>
+                  <span class="severity-desc">{opt.desc}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          <!-- Description -->
+          <div class="form-group">
+            <label class="form-label" for="desc-input">
+              📝 Deskripsi
+            </label>
+            <textarea
+              id="desc-input"
+              class="form-textarea"
+              placeholder="Ceritakan kondisi jalannya... (opsional tapi membantu)"
+              rows="3"
+              bind:value={description}
+              maxlength="500"
+            ></textarea>
+            <span class="form-hint">{description.length}/500 karakter</span>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Step 3: Confirm -->
+      {#if step === 3}
+        <div class="step-content">
+          <div class="step-header">
+            <h2>✅ Konfirmasi Laporan</h2>
+            <p>Periksa kembali sebelum mengirim</p>
+          </div>
+
+          <div class="preview-card">
+            <!-- Photos preview -->
+            {#if photos.length > 0}
+              <div class="preview-photos">
+                {#each photos as photo, i}
+                  <img src={photo.preview} alt="Preview {i + 1}" class="preview-img" />
+                {/each}
+              </div>
+            {:else}
+              <div class="preview-no-photo">
+                <Camera size={48} />
+                <p>Belum ada foto</p>
+              </div>
+            {/if}
+
+            <div class="preview-info">
+              <div class="preview-row">
+                <span class="preview-label">📍 Lokasi</span>
+                <span class="preview-value">{locationText || 'Belum dideteksi'}</span>
+              </div>
+              <div class="preview-row">
+                <span class="preview-label">⚠️ Tingkat</span>
+                <span class="preview-value">
+                  {severityOptions.find(o => o.value === severity)?.label || 'Belum dipilih'}
+                </span>
+              </div>
+              {#if description}
+                <div class="preview-row">
+                  <span class="preview-label">📝 Deskripsi</span>
+                  <span class="preview-value">{description}</span>
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          {#if submitError}
+            <div class="error-box">
+              <AlertTriangle size={16} />
+              <span>{submitError}</span>
+            </div>
+          {/if}
+
+          <label class="tos-checkbox">
+            <input type="checkbox" bind:checked={agreedTos} />
+            <span class="checkmark"></span>
+            <span>Saya bertanggung jawab atas kebenaran data yang dilaporkan dan setuju dengan S&K JEDUG.</span>
+          </label>
+        </div>
+      {/if}
+
+      <!-- Actions -->
+      <div class="form-actions">
+        {#if step > 1}
+          <button class="btn btn-secondary" on:click={prevStep} disabled={isSubmitting}>
+            Kembali
+          </button>
+        {/if}
+
+        {#if step < 3}
+          <button
+            class="btn btn-primary"
+            on:click={nextStep}
+            disabled={step === 1 && photos.length === 0}
+          >
+            Lanjut
+          </button>
+        {:else}
+          <button
+            class="btn btn-primary btn-submit"
+            on:click={submitReport}
+            disabled={!agreedTos || isSubmitting || !userLat || !severity}
+          >
+            {#if isSubmitting}
+              <Loader2 size={18} class="spin" />
+              Mengirim...
+            {:else}
+              <Send size={18} />
+              Kirim Laporan
+            {/if}
+          </button>
+        {/if}
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .report-page {
@@ -293,6 +431,40 @@
   .report-container {
     width: 100%;
     max-width: 600px;
+  }
+
+  /* Success Screen */
+  .success-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 60vh;
+    text-align: center;
+    padding: var(--space-xl);
+    gap: var(--space-md);
+  }
+  .success-icon {
+    color: var(--color-success);
+    animation: scaleIn 0.5s ease;
+  }
+  @keyframes scaleIn {
+    from { transform: scale(0); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+  }
+  .success-screen h2 {
+    font-size: var(--text-2xl);
+    font-weight: var(--font-bold);
+  }
+  .success-screen p {
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+    max-width: 400px;
+  }
+  .redirect-text {
+    color: var(--text-tertiary) !important;
+    font-size: var(--text-xs) !important;
+    margin-top: var(--space-lg);
   }
 
   /* Progress Bar */
@@ -409,6 +581,16 @@
     cursor: pointer;
     border: none;
   }
+  .photo-size {
+    position: absolute;
+    bottom: 4px;
+    left: 4px;
+    font-size: 0.6rem;
+    color: white;
+    background: rgba(0,0,0,0.6);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+  }
 
   .photo-add {
     aspect-ratio: 4/3;
@@ -437,6 +619,19 @@
     color: var(--color-primary);
   }
 
+  .compression-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--color-success-light);
+    border-radius: var(--radius-md);
+    color: var(--color-success);
+    font-size: var(--text-xs);
+    font-weight: var(--font-medium);
+    margin-bottom: var(--space-md);
+  }
+
   .info-box {
     display: flex;
     align-items: flex-start;
@@ -447,6 +642,18 @@
     color: var(--color-info);
     font-size: var(--text-sm);
     line-height: var(--leading-relaxed);
+  }
+
+  .error-box {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-md);
+    background: var(--color-danger-light);
+    border-radius: var(--radius-md);
+    color: var(--color-danger);
+    font-size: var(--text-sm);
+    margin-bottom: var(--space-md);
   }
 
   /* Form */
@@ -499,6 +706,10 @@
     font-size: var(--text-xs);
     color: var(--text-tertiary);
   }
+  .form-hint.coordinate {
+    color: var(--color-success);
+    font-weight: var(--font-medium);
+  }
 
   /* Location input */
   .location-input {
@@ -536,6 +747,10 @@
     border-top-color: white;
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
 
   /* Severity Grid */
@@ -699,6 +914,10 @@
   }
   .btn-submit:hover {
     background: #2F855A;
+  }
+
+  :global(.spin) {
+    animation: spin 1s linear infinite;
   }
 
   @media (min-width: 769px) {
