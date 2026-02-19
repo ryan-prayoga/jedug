@@ -27,6 +27,9 @@ CREATE TABLE reports (
     district_id INT REFERENCES districts(id), -- Auto-fill by PostGIS Trigger/Query
     image_url VARCHAR(255) NOT NULL,
     
+    -- Detail Laporan
+    description TEXT, -- Deskripsi kerusakan oleh pelapor
+    
     -- Status Jalan
     status VARCHAR(20) DEFAULT 'open', -- 'open', 'fixed', 'archived', 'rejected'
     severity INT DEFAULT 1, -- 1 (Kuning) - 5 (Hitam/Neraka)
@@ -42,6 +45,11 @@ CREATE TABLE reports (
 );
 -- Index Spatial supaya query "Cari lubang radius 500m" cepat
 CREATE INDEX idx_reports_loc ON reports USING GIST(location);
+-- Index untuk query umum
+CREATE INDEX idx_reports_status ON reports(status);
+CREATE INDEX idx_reports_severity ON reports(severity);
+CREATE INDEX idx_reports_created ON reports(created_at DESC);
+CREATE INDEX idx_reports_district ON reports(district_id);
 
 
 -- 4. TABEL BUKTI TAMBAHAN (Galeri Warga)
@@ -52,6 +60,7 @@ CREATE TABLE report_proofs (
     image_url VARCHAR(255) NOT NULL,
     taken_at TIMESTAMPTZ DEFAULT NOW()
 );
+CREATE INDEX idx_proofs_report ON report_proofs(report_id);
 
 
 -- 5. TABEL INTERAKSI (Reaction & Comment)
@@ -69,6 +78,7 @@ CREATE TABLE interactions (
     -- Constraint: 1 Device cuma boleh 1 reaction per laporan (Anti Spam)
     UNIQUE(report_id, fingerprint_hash, type)
 );
+CREATE INDEX idx_interactions_report ON interactions(report_id);
 
 
 -- 6. TABEL USER (Untuk Gamification - Optional)

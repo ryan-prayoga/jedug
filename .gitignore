@@ -9,6 +9,8 @@ dist/
 backend/bin/
 backend/tmp/
 backend/vendor/
+backend/uploads/
+backend/server
 
 # Pocketbase / DB Data
 pocketbase/pb_data/
